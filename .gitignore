@@ -4,12 +4,12 @@ __pycache__/
 venv/
 build/
 dist/
-*.spec
 *.exe
 *.zip
 *.pdf
 DPL_Preview/
 **/DPL_Preview/
+samples/*.png
 
 # Never publish plant labels, local font inventories, or vendor packages.
 dpl_max/

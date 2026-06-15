@@ -1,69 +1,123 @@
 # Datamax DPL Preview
 
-[中文](#中文說明) | [English](#english)
+[中文](#中文) | [English](#english)
 
-## 中文說明
+## 中文
 
-這是一套獨立的 Python 工具，可將 Datamax DPL 標籤檔案轉換為 HTML/SVG
-預覽圖庫。此工具以 Datamax-O'Neil I-4310e Mark II 300 dpi 的實際 DPL
-檔案為基礎開發。
+`Datamax DPL Preview` 是一個以 Python 撰寫的 Datamax DPL 預覽工具，目標是把
+`.MAX`、`.DPL`、`.PRN`、`.TXT` 標籤檔快速轉成可視化預覽，方便工程師批次檢查版面。
 
-工具以 bytes 模式讀取檔案，避免破壞 DPL 控制字元。它不會將資料傳送到
-印表機，也不會修改原始標籤檔案。
+這個版本是依照 `Datamax-O'Neil I-4310e Mark II`、`300 dpi` 的現場資料持續校準，
+目前同時提供：
 
-### 功能
+- 大量檔案 HTML/SVG 預覽頁
+- 單檔 / 貼上 DPL 內容的 Windows GUI 預覽器
 
-- 批次預覽 `.MAX`、`.DPL`、`.PRN` 與 `.TXT` 檔案
-- 支援 DPL 文字、可縮放字型、線條、外框與標籤座標偏移
-- 支援 Code 39 與 Code 128 預覽
-- 支援 QR Code 與 Data Matrix 預覽
-- 支援 Datamax ASCII 十六進位內嵌圖形與圖形呼叫
-- 使用代表性測試資料模擬 MES 變數
-- 產生可搜尋的 HTML 圖庫，每張標籤另有 SVG 檔案
-- Windows 批次檔支援拖曳檔案或資料夾執行
+工具全程以 `bytes` 讀取來源檔，避免破壞 DPL 控制碼，不會修改原始標籤檔。
 
-### 系統需求
+### 特色
 
-- Python 3.10 或更新版本
-- `requirements.txt` 內的條碼套件為選用相依套件
+- 支援 `.MAX`、`.DPL`、`.PRN`、`.TXT`
+- 支援文字、scalable fonts、line、box、graphic call、ASCII-hex graphic
+- 支援 Code 39、Code 128、QR Code、Data Matrix 預覽
+- 支援常見 MES / DSLabel 變數替代顯示
+- 支援 `labelindex.csv`、檔名尺寸規則、DSLabel 規則推測標籤大小
+- GUI 可直接開檔、開資料夾、貼上 DPL、縮放、套用手動標籤尺寸、輸出 SVG
+- GUI 預覽優先共用 web 版 SVG 渲染路徑，再由 Edge / Chrome headless 轉圖，降低 EXE 與網頁版的顯示落差
+
+### 專案內容
+
+- `datamax_dpl_preview.py`
+  - 批次掃描資料夾，輸出 `DPL_Preview/index.html` 與每張標籤的 SVG
+- `datamax_dpl_preview_gui.py`
+  - Windows GUI 預覽器
+- `Run_DPL_Preview.bat`
+  - 批次產生 HTML/SVG 預覽
+- `Run_DPL_Preview_GUI.bat`
+  - 啟動 GUI 預覽器
+- `datamax_dpl_preview_gui.spec`
+  - PyInstaller 打包設定
+
+### 安裝需求
+
+- Python 3.10 以上
+- 建議安裝 `requirements.txt`
+- GUI 若要接近 web 版排版結果，建議系統安裝 Microsoft Edge 或 Google Chrome
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-未安裝選用套件時，工具仍可執行，但部分條碼類型會使用替代的視覺圖樣。
+若未安裝選用套件，程式仍可運作，但部分條碼會使用 fallback 圖樣。
 
 ### 使用方式
 
-預覽專案內附的合成範例：
-
-```powershell
-python datamax_dpl_preview.py samples
-```
-
-遞迴預覽資料夾內的標籤：
+批次預覽整個資料夾：
 
 ```powershell
 python datamax_dpl_preview.py "C:\path\to\labels" --recursive
 ```
 
-Windows 使用者也可以雙擊 `Run_DPL_Preview.bat` 後輸入路徑，或將標籤檔案
-或資料夾拖曳到批次檔上。
-
-產生的預覽圖庫位於：
+輸出位置：
 
 ```text
-<輸入資料夾>\DPL_Preview\index.html
+<input folder>\DPL_Preview\index.html
 ```
 
-### 適用範圍與準確性
+啟動 GUI 預覽器：
 
-本專案是用於快速視覺檢查的工具，不是完整的印表機模擬器。Datamax
-印表機韌體、下載字型、紙張校正、列印濃度及機械公差都可能影響實際列印
-結果。重要標籤仍應使用目標印表機實際列印，並掃描驗證 1D/2D 條碼。
+```powershell
+python datamax_dpl_preview_gui.py
+```
 
-此 repository 僅包含合成標籤範例。提交問題時，請勿公開量產標籤、客戶
-資料、專有字型、印表機驅動程式或原廠手冊。
+Windows 也可以直接雙擊：
+
+- `Run_DPL_Preview.bat`
+- `Run_DPL_Preview_GUI.bat`
+
+### PyInstaller 打包
+
+保留 console 的打包方式：
+
+```powershell
+python -m PyInstaller datamax_dpl_preview_gui.spec --distpath dist --workpath build
+```
+
+輸出檔案：
+
+```text
+dist\Datamax_DPL_Preview_Viewer.exe
+```
+
+### 準確度與限制
+
+這是視覺檢查工具，不是 Datamax 韌體等級的完整模擬器。
+
+仍可能影響實際列印結果的因素包括：
+
+- 印表機內下載字型
+- 印表機 darkness / speed / calibration
+- 實體標籤材質
+- 機械誤差
+- 某些未隨 DPL 檔一起保存的外部 graphic / image 資源
+
+對於正式量產標籤，仍必須：
+
+- 實機列印樣張
+- 掃描驗證 1D barcode / 2D code
+
+### 公開發佈注意事項
+
+此 repository 應只保留工具本身與合成樣本。
+
+不要公開：
+
+- 客戶正式標籤檔
+- 工廠現場資料
+- 專有字型檔
+- Seagull / 廠商驅動套件
+- Vendor manual PDF
+- 任何含 MES / SN / LOT 真實資料的測試檔
 
 ### 測試
 
@@ -77,69 +131,124 @@ MIT
 
 ## English
 
-This standalone Python tool renders Datamax DPL label files into an HTML/SVG
-preview gallery. It was developed against DPL files used by a
-Datamax-O'Neil I-4310e Mark II at 300 dpi.
+`Datamax DPL Preview` is a Python-based visual preview tool for Datamax DPL
+label files. It converts `.MAX`, `.DPL`, `.PRN`, and `.TXT` files into
+previewable output so engineers can inspect layouts quickly without modifying
+the source data.
 
-The tool reads input as bytes to preserve DPL control characters. It does not
-send data to a printer and does not modify the source label files.
+This version has been iteratively calibrated against a
+`Datamax-O'Neil I-4310e Mark II` at `300 dpi` and currently provides:
+
+- an HTML/SVG batch preview gallery
+- a Windows GUI viewer for single files or pasted DPL
+
+The tool reads files as `bytes` to preserve DPL control characters. It does
+not modify the original label files.
 
 ### Features
 
-- Batch preview for `.MAX`, `.DPL`, `.PRN`, and `.TXT` files
-- DPL text records, scalable fonts, lines, boxes, and label offsets
-- Code 39 and Code 128 preview
-- QR Code and Data Matrix preview
-- Embedded Datamax ASCII-hex graphics and graphic calls
-- MES-style variable substitution using representative sample values
-- Searchable HTML gallery with one SVG file per label
-- Drag-and-drop file or folder support through the Windows batch file
+- Supports `.MAX`, `.DPL`, `.PRN`, and `.TXT`
+- Renders text, scalable fonts, lines, boxes, graphic calls, and ASCII-hex graphics
+- Previews Code 39, Code 128, QR Code, and Data Matrix
+- Expands common MES / DSLabel variables into representative sample values
+- Infers label size from `labelindex.csv`, filename-based rules, and DSLabel rules
+- GUI viewer supports file open, folder browse, pasted DPL, zoom, manual label size, and SVG export
+- GUI preview reuses the same SVG rendering path as the web preview and then rasterizes through Edge / Chrome headless when available
+
+### Project Files
+
+- `datamax_dpl_preview.py`
+  - batch HTML/SVG preview generator
+- `datamax_dpl_preview_gui.py`
+  - Windows GUI viewer
+- `Run_DPL_Preview.bat`
+  - launch batch HTML/SVG preview generation
+- `Run_DPL_Preview_GUI.bat`
+  - launch the GUI viewer
+- `datamax_dpl_preview_gui.spec`
+  - PyInstaller build spec
 
 ### Requirements
 
 - Python 3.10 or newer
-- Optional barcode dependencies from `requirements.txt`
+- Recommended: install dependencies from `requirements.txt`
+- Recommended for GUI fidelity: Microsoft Edge or Google Chrome installed
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-Without the optional packages, the tool still runs, but some barcode types use
-fallback visual patterns.
+Without optional packages, the tool still runs, but some barcode types fall
+back to simplified visual patterns.
 
 ### Usage
 
-Preview the included synthetic sample:
-
-```powershell
-python datamax_dpl_preview.py samples
-```
-
-Preview a folder recursively:
+Generate a recursive preview for a label folder:
 
 ```powershell
 python datamax_dpl_preview.py "C:\path\to\labels" --recursive
 ```
 
-Windows users can also double-click `Run_DPL_Preview.bat` and enter a path, or
-drag a label file or folder onto the batch file.
-
-The generated gallery is written to:
+Output location:
 
 ```text
 <input folder>\DPL_Preview\index.html
 ```
 
+Run the GUI viewer:
+
+```powershell
+python datamax_dpl_preview_gui.py
+```
+
+On Windows you can also double-click:
+
+- `Run_DPL_Preview.bat`
+- `Run_DPL_Preview_GUI.bat`
+
+### PyInstaller Packaging
+
+Console-preserving build command:
+
+```powershell
+python -m PyInstaller datamax_dpl_preview_gui.spec --distpath dist --workpath build
+```
+
+Output executable:
+
+```text
+dist\Datamax_DPL_Preview_Viewer.exe
+```
+
 ### Scope And Accuracy
 
-This project is a visual screening tool, not a complete printer emulator.
-Datamax printer firmware, downloaded fonts, media calibration, print darkness,
-and mechanical tolerances can change the physical result. Always validate
-critical labels on the target printer and scan-test 1D/2D codes.
+This is a visual screening tool, not a full Datamax firmware emulator.
 
-This repository intentionally contains only synthetic label samples. Do not
-publish production labels, customer data, proprietary fonts, printer drivers,
-or vendor manuals in bug reports.
+Physical output can still differ because of:
+
+- downloaded printer fonts
+- print darkness, speed, and calibration
+- label stock material
+- mechanical tolerances
+- external graphics or images that were not stored inside the DPL job
+
+For production labels, always:
+
+- print real samples
+- scan-verify 1D barcodes and 2D codes
+
+### Publishing Notes
+
+This repository should contain only the tool itself and synthetic samples.
+
+Do not publish:
+
+- production label files
+- plant data
+- proprietary font files
+- Seagull or vendor driver packages
+- vendor manual PDFs
+- any test files containing real MES / SN / LOT data
 
 ### Tests
 

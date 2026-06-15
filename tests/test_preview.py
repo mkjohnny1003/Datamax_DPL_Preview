@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import sys
+import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from datamax_dpl_preview import (
     LabelElement,
@@ -10,6 +14,12 @@ from datamax_dpl_preview import (
     datamatrix_matrix,
     decode_graphic_rows,
     estimate_barcode_width,
+    estimate_canvas_size,
+    extract_label_paper_sizes,
+    font_style,
+    label_size_candidates,
+    load_datamax_profile,
+    mm_to_units,
     parse_datamatrix,
     parse_dpl_preview,
     parse_graphic_call,
@@ -131,6 +141,137 @@ class LabelOffsetTests(unittest.TestCase):
 
         self.assertEqual(len(parsed.elements), 1)
         self.assertEqual((parsed.elements[0].x, parsed.elements[0].y), (340, 115))
+
+    def test_final_dpl_without_start_marker_is_still_parsed(self) -> None:
+        data = (
+            b"\x02L\r\n"
+            b"1911A1002100022Product Name:\r\n"
+            b"1911A10021001200123456789\r\n"
+            b"Q0001\r\nE\r\n"
+        )
+
+        parsed = parse_dpl_preview(Path("final_dpl.prn"), data)
+
+        self.assertEqual(len(parsed.elements), 2)
+        self.assertEqual(parsed.font_counts["A10"], 2)
+
+
+class LabelSizeRuleTests(unittest.TestCase):
+    def test_labelindex_label_paper_extracts_dimensions(self) -> None:
+        self.assertEqual(
+            extract_label_paper_sizes("[松翰專用]44x44雙排(白)"),
+            [(44.0, 44.0)],
+        )
+        self.assertEqual(
+            extract_label_paper_sizes("[聯詠專用] 130*75"),
+            [(130.0, 75.0)],
+        )
+
+    def test_labelindex_csv_is_used_before_filename_guess(self) -> None:
+        candidates = label_size_candidates(Path("AD_6A31DS.MAX"))
+
+        self.assertEqual(
+            candidates[0],
+            (mm_to_units(44.0), mm_to_units(44.0), "44x44 mm labelindex.csv"),
+        )
+
+    def test_filename_dimension_rule_applies_directly(self) -> None:
+        candidates = label_size_candidates(Path("AJ_TailDefect_44x44S.MAX"))
+
+        self.assertIn(
+            (mm_to_units(44.0), mm_to_units(44.0), "44x44 mm filename rule"),
+            candidates,
+        )
+
+    def test_dslabel_exact_rule_overrides_small_content_canvas(self) -> None:
+        parsed = ParsedLabel(
+            path=Path("materials_PASS.MAX"),
+            elements=[LabelElement(kind="text", x=10, y=12, w=30, h=8)],
+        )
+
+        width, height, _min_x, _min_y = estimate_canvas_size(parsed)
+
+        self.assertEqual(width, mm_to_units(70.0))
+        self.assertEqual(height, mm_to_units(30.0))
+        self.assertEqual(parsed.label_size, "70x30 mm DSLabel rule")
+
+    def test_canvas_expands_when_dslabel_guess_is_smaller_than_content(self) -> None:
+        parsed = ParsedLabel(
+            path=Path("JI_TRAY_Label.MAX"),
+            elements=[LabelElement(kind="box", x=0, y=0, w=460, h=180)],
+        )
+
+        width, height, _min_x, _min_y = estimate_canvas_size(parsed)
+
+        self.assertEqual(width, 464)
+        self.assertEqual(height, max(mm_to_units(40.0), 184))
+        self.assertIn("expanded to fit content", parsed.label_size)
+
+
+class DatamaxProfileTests(unittest.TestCase):
+    def test_datamax_profile_loader_reads_downloaded_and_resident_fonts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            profile_dir = root / "datamax"
+            profile_dir.mkdir()
+            (profile_dir / "datamax_Downloaded_fonts_STXWF.txt").write_text(
+                "Module: G\r\nS96 Arial96\r\nS95 ArialNarrowB95\r\nAvailable Bytes: 123\r\n",
+                encoding="latin-1",
+            )
+            (profile_dir / "datamax_Resident_fonts_STXWf.txt").write_text(
+                "S01 Triumvirate\r\nS00 Tri-Bold\r\n",
+                encoding="latin-1",
+            )
+            (profile_dir / "datamax_All_memory_contents_STXWALL.txt").write_text(
+                "Module: G\r\nS96 Arial96\r\nModule: Y\r\nMARKED\r\n",
+                encoding="latin-1",
+            )
+            (profile_dir / "datamax_Firmware_STXv.txt").write_text(
+                "VER: I4310e, 10.04_0056\r\n",
+                encoding="latin-1",
+            )
+            (profile_dir / "datamax_Status_SOHA.txt").write_text(
+                "NNNNNNNN\r\n",
+                encoding="latin-1",
+            )
+            sample_path = root / "demo.MAX"
+            sample_path.write_bytes(b"[Start]\r\n")
+
+            profile = load_datamax_profile(sample_path)
+
+            self.assertIsNotNone(profile)
+            assert profile is not None
+            self.assertEqual(profile.downloaded_fonts["S96"], "Arial96")
+            self.assertEqual(profile.resident_scalable_fonts["S01"], "Triumvirate")
+            self.assertEqual(profile.firmware, "VER: I4310e, 10.04_0056")
+            self.assertEqual(profile.status_raw, "NNNNNNNN")
+
+    def test_downloaded_font_profile_overrides_svg_font_family(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            profile_dir = root / "datamax"
+            profile_dir.mkdir()
+            (profile_dir / "datamax_Downloaded_fonts_STXWF.txt").write_text(
+                "Module: G\r\nS97 Courier New97\r\nAvailable Bytes: 123\r\n",
+                encoding="latin-1",
+            )
+            (profile_dir / "datamax_Resident_fonts_STXWf.txt").write_text(
+                "",
+                encoding="latin-1",
+            )
+            (profile_dir / "datamax_All_memory_contents_STXWALL.txt").write_text(
+                "Module: G\r\nS97 Courier New97\r\n",
+                encoding="latin-1",
+            )
+            sample_path = root / "demo.MAX"
+            sample_path.write_bytes(b"[Start]\r\n")
+
+            profile = load_datamax_profile(sample_path)
+
+            self.assertIsNotNone(profile)
+            assert profile is not None
+            style = font_style("S97", profile)
+            self.assertEqual(style["family"], "'Courier New', Courier, monospace")
 
 
 class ScalableTextTests(unittest.TestCase):

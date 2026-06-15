@@ -13,6 +13,7 @@ from hashlib import md5
 from html import escape
 from pathlib import Path
 import argparse
+import csv
 import math
 import re
 import sys
@@ -37,6 +38,7 @@ except ImportError:
 PRINTER_DPI = 300
 DPL_POSITION_UNITS_PER_INCH = 100
 FONT_DOT_TO_POSITION = DPL_POSITION_UNITS_PER_INCH / PRINTER_DPI
+DPL_UNITS_PER_MM = DPL_POSITION_UNITS_PER_INCH / 25.4
 QR_PREVIEW_DATA = "ABC0123456789"
 PRINTER_MODEL = "Datamax-O'Neil I-4310e Mark II"
 PRINTER_MAX_MEDIA_WIDTH_MM = 118.1
@@ -78,6 +80,8 @@ VARIABLE_RE = re.compile(r"^V(?P<index>\d+)=(?P<value>.*)$")
 ANGLE_VAR_RE = re.compile(r"<([^>]+)>")
 COLUMN_OFFSET_RE = re.compile(r"^C(?P<offset>\d{4})$")
 ROW_OFFSET_RE = re.compile(r"^R(?P<offset>\d{4})$")
+FILENAME_SIZE_RE = re.compile(r"(?<!\d)(?P<w>\d{2,3})\s*[xX]\s*(?P<h>\d{2,3})(?!\d)")
+LABEL_PAPER_SIZE_RE = re.compile(r"(?P<w>\d{2,3})\s*[xX\*]\s*(?P<h>\d{2,3})")
 
 A_FONT_HEIGHTS = {
     "03": 7,
@@ -94,11 +98,14 @@ A_FONT_HEIGHTS = {
 FONT_STYLE_MAP = {
     "S00": {"family": "Arial Black, Arial, sans-serif", "weight": "900", "scale": 1.0},
     "S01": {"family": "Arial, sans-serif", "weight": "400", "scale": 0.82},
-    "S94": {"family": "Arial, sans-serif", "weight": "400", "scale": 0.82},
-    "S95": {"family": "Arial Black, Arial, sans-serif", "weight": "900", "scale": 1.0},
-    "S96": {"family": "Arial, sans-serif", "weight": "400", "scale": 0.82},
-    "S97": {"family": "Arial, sans-serif", "weight": "400", "scale": 0.86},
-    "S98": {"family": "Arial, sans-serif", "weight": "400", "scale": 0.82},
+    "S50": {"family": "Arial, sans-serif", "weight": "400", "scale": 1.0},
+    "S51": {"family": "Arial Black, Arial, sans-serif", "weight": "900", "scale": 1.0},
+    "S52": {"family": "Arial Narrow, Arial, sans-serif", "weight": "400", "scale": 1.0},
+    "S94": {"family": "'Times New Roman', Times, serif", "weight": "400", "scale": 1.0},
+    "S95": {"family": "Arial Narrow, Arial, sans-serif", "weight": "700", "scale": 1.0},
+    "S96": {"family": "Arial, sans-serif", "weight": "400", "scale": 1.0},
+    "S97": {"family": "'Courier New', Courier, monospace", "weight": "400", "scale": 1.0},
+    "S98": {"family": "Arial Black, Arial, sans-serif", "weight": "900", "scale": 1.0},
     "A05": {"family": "Arial, sans-serif", "weight": "400", "scale": 1.0},
     "A06": {"family": "Arial, sans-serif", "weight": "400", "scale": 1.0},
     "A08": {"family": "Arial, sans-serif", "weight": "400", "scale": 1.0},
@@ -107,6 +114,30 @@ FONT_STYLE_MAP = {
     "A14": {"family": "Arial, sans-serif", "weight": "400", "scale": 1.0},
     "A18": {"family": "Arial, sans-serif", "weight": "400", "scale": 1.0},
 }
+
+EXACT_SIZE_RULES_MM = {
+    "MATERIALS_PASS": [(70.0, 30.0, "70x30 mm DSLabel rule")],
+    "CGC_BOX_LABEL": [(85.0, 50.0, "85x50 mm DSLabel rule")],
+    "CGC_CARTONEXTRA_LABEL": [(85.0, 50.0, "85x50 mm DSLabel rule")],
+    "JI_BOX_LABEL": [(85.0, 50.0, "85x50 mm DSLabel rule")],
+    "JI_CARTONEXTRA_LABEL": [(85.0, 50.0, "85x50 mm DSLabel rule")],
+    "JI_TRAY_LABEL": [(100.0, 40.0, "100x40 mm DSLabel rule")],
+}
+
+GROUP_SIZE_RULES_MM = (
+    (re.compile(r"WP_TRAY_LABEL_3N4", re.IGNORECASE), [(76.2, 101.6, "3x4 in DSLabel rule")]),
+    (
+        re.compile(r"WP_BOX_LABEL_LOTQTY", re.IGNORECASE),
+        [
+            (101.6, 101.6, "4x4 in DSLabel rule"),
+            (101.6, 152.4, "4x6 in DSLabel rule"),
+        ],
+    ),
+)
+LABELINDEX_CSV_NAME = "labelindex.csv"
+DATAMAX_PROFILE_DIR_NAME = "datamax"
+_LABELINDEX_SIZE_CACHE: dict[Path, dict[str, list[tuple[int, int, str]]]] = {}
+_DATAMAX_PROFILE_CACHE: dict[Path, "DatamaxPrinterProfile"] = {}
 
 @dataclass
 class LabelElement:
@@ -132,6 +163,32 @@ class ParsedLabel:
     graphics: dict[str, tuple[int, int, list[str]]] = field(default_factory=dict)
     missing_graphics: set[str] = field(default_factory=set)
     label_size: str = ""
+
+
+@dataclass
+class DatamaxPrinterProfile:
+    source_dir: Path
+    firmware: str = ""
+    status_raw: str = ""
+    downloaded_fonts: dict[str, str] = field(default_factory=dict)
+    resident_scalable_fonts: dict[str, str] = field(default_factory=dict)
+    module_contents: dict[str, list[str]] = field(default_factory=dict)
+
+    @property
+    def downloaded_font_summary(self) -> str:
+        if not self.downloaded_fonts:
+            return "none"
+        return ", ".join(
+            f"{code}={name}" for code, name in sorted(self.downloaded_fonts.items())
+        )
+
+    @property
+    def resident_font_summary(self) -> str:
+        if not self.resident_scalable_fonts:
+            return "none"
+        return ", ".join(
+            f"{code}={name}" for code, name in sorted(self.resident_scalable_fonts.items())
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -583,7 +640,8 @@ def parse_graphic_call(line: str, parsed: ParsedLabel) -> LabelElement | None:
 def parse_dpl_preview(path: Path, data: bytes) -> ParsedLabel:
     parsed = ParsedLabel(path=path)
     lines = decode_ascii_safe(data).split("\n")
-    in_header = True
+    has_start_marker = any(line.strip().upper() == "[START]" for line in lines)
+    in_header = has_start_marker
     active_graphic_name: str | None = None
     active_graphic_rows: list[str] = []
     column_offset = 0
@@ -674,11 +732,276 @@ def estimate_canvas_size(parsed: ParsedLabel) -> tuple[int, int, int, int]:
 
     content_width = width - min_x
     content_height = height - min_y
-    parsed.label_size = "300 dpi canvas"
-    return content_width, content_height, min_x, min_y
+    override = infer_label_canvas(parsed.path, content_width, content_height)
+    if override is None:
+        parsed.label_size = "300 dpi canvas"
+        return content_width, content_height, min_x, min_y
+
+    page_width, page_height, note = override
+    parsed.label_size = note
+    return page_width, page_height, min_x, min_y
 
 
-def font_style(font_code: str) -> dict[str, str | float]:
+def infer_label_canvas(
+    path: Path, content_width: int, content_height: int
+) -> tuple[int, int, str] | None:
+    candidates = label_size_candidates(path)
+    if not candidates:
+        return None
+
+    chosen_width, chosen_height, note = min(
+        candidates,
+        key=lambda item: (
+            max(0, content_width - item[0]) + max(0, content_height - item[1]),
+            item[0] * item[1],
+        ),
+    )
+    page_width = max(content_width, chosen_width)
+    page_height = max(content_height, chosen_height)
+    if page_width != chosen_width or page_height != chosen_height:
+        note = f"{note}; expanded to fit content"
+    return page_width, page_height, note
+
+
+def label_size_candidates(path: Path) -> list[tuple[int, int, str]]:
+    normalized = normalize_label_name(path)
+    candidates: list[tuple[int, int, str]] = []
+
+    candidates.extend(labelindex_size_candidates(path))
+
+    for width_mm, height_mm, note in EXACT_SIZE_RULES_MM.get(normalized, []):
+        candidates.append((mm_to_units(width_mm), mm_to_units(height_mm), note))
+
+    for pattern, group_candidates in GROUP_SIZE_RULES_MM:
+        if pattern.search(normalized):
+            for width_mm, height_mm, note in group_candidates:
+                candidates.append((mm_to_units(width_mm), mm_to_units(height_mm), note))
+
+    token_match = FILENAME_SIZE_RE.search(path.stem)
+    if token_match:
+        width_mm = float(token_match.group("w"))
+        height_mm = float(token_match.group("h"))
+        candidates.append(
+            (
+                mm_to_units(width_mm),
+                mm_to_units(height_mm),
+                f"{token_match.group('w')}x{token_match.group('h')} mm filename rule",
+            )
+        )
+
+    return dedupe_size_candidates(candidates)
+
+
+def labelindex_size_candidates(path: Path) -> list[tuple[int, int, str]]:
+    labelindex_sizes = load_labelindex_size_map(path)
+    return list(labelindex_sizes.get(path.name.upper(), []))
+
+
+def load_labelindex_size_map(path: Path) -> dict[str, list[tuple[int, int, str]]]:
+    csv_path = find_labelindex_csv(path)
+    if csv_path is None:
+        return {}
+    cached = _LABELINDEX_SIZE_CACHE.get(csv_path)
+    if cached is not None:
+        return cached
+
+    text = csv_path.read_bytes().decode("cp950", errors="replace")
+    rows = csv.DictReader(text.splitlines())
+    mapping: dict[str, list[tuple[int, int, str]]] = {}
+    for row in rows:
+        label_file = row.get("labelFile", "").strip()
+        label_paper = row.get("LabelPaper", "").strip()
+        if not label_file or not label_paper or not label_file.upper().endswith(".MAX"):
+            continue
+        sizes = extract_label_paper_sizes(label_paper)
+        if not sizes:
+            continue
+        key = Path(label_file).name.upper()
+        mapping.setdefault(key, [])
+        for width_mm, height_mm in sizes:
+            mapping[key].append(
+                (
+                    mm_to_units(width_mm),
+                    mm_to_units(height_mm),
+                    f"{width_mm:g}x{height_mm:g} mm labelindex.csv",
+                )
+            )
+
+    deduped = {
+        key: dedupe_size_candidates(value)
+        for key, value in mapping.items()
+    }
+    _LABELINDEX_SIZE_CACHE[csv_path] = deduped
+    return deduped
+
+
+def find_labelindex_csv(path: Path) -> Path | None:
+    candidate_roots = [
+        path.parent if path.is_file() else path,
+        Path(__file__).resolve().parent,
+        Path(__file__).resolve().parent.parent,
+        Path.cwd(),
+    ]
+    executable = Path(sys.executable).resolve()
+    candidate_roots.extend([executable.parent, executable.parent.parent])
+    seen: set[Path] = set()
+    for root in candidate_roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        candidate = root / LABELINDEX_CSV_NAME
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+def read_text_if_exists(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="latin-1", errors="replace").replace("\r", "")
+
+
+def parse_module_listing(text: str) -> dict[str, list[str]]:
+    module_contents: dict[str, list[str]] = {}
+    current_module = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("Module: "):
+            current_module = line.split(":", 1)[1].strip()
+            module_contents.setdefault(current_module, [])
+            continue
+        if line.startswith("Available Bytes:"):
+            continue
+        if current_module:
+            module_contents.setdefault(current_module, []).append(line)
+    return module_contents
+
+
+def parse_resident_scalable_fonts(text: str) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("S"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        mapping[parts[0]] = parts[1].strip()
+    return mapping
+
+
+def find_datamax_profile_dir(path: Path) -> Path | None:
+    candidate_roots = [
+        path.parent if path.is_file() else path,
+        Path(__file__).resolve().parent,
+        Path(__file__).resolve().parent.parent,
+        Path.cwd(),
+    ]
+    executable = Path(sys.executable).resolve()
+    candidate_roots.extend([executable.parent, executable.parent.parent])
+    seen: set[Path] = set()
+    for root in candidate_roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        candidate = root / DATAMAX_PROFILE_DIR_NAME
+        if candidate.exists() and candidate.is_dir():
+            return candidate.resolve()
+    return None
+
+
+def load_datamax_profile(path: Path) -> DatamaxPrinterProfile | None:
+    profile_dir = find_datamax_profile_dir(path)
+    if profile_dir is None:
+        return None
+    cached = _DATAMAX_PROFILE_CACHE.get(profile_dir)
+    if cached is not None:
+        return cached
+
+    profile = DatamaxPrinterProfile(source_dir=profile_dir)
+    downloaded_text = read_text_if_exists(profile_dir / "datamax_Downloaded_fonts_STXWF.txt")
+    resident_text = read_text_if_exists(profile_dir / "datamax_Resident_fonts_STXWf.txt")
+    all_memory_text = read_text_if_exists(profile_dir / "datamax_All_memory_contents_STXWALL.txt")
+    firmware_text = read_text_if_exists(profile_dir / "datamax_Firmware_STXv.txt")
+    status_text = read_text_if_exists(profile_dir / "datamax_Status_SOHA.txt")
+
+    profile.firmware = firmware_text.strip()
+    profile.status_raw = status_text.strip()
+    downloaded_fonts: dict[str, str] = {}
+    for entry in parse_module_listing(downloaded_text).get("G", []):
+        parts = entry.split(None, 1)
+        if len(parts) != 2:
+            continue
+        downloaded_fonts[parts[0].strip()] = parts[1].strip()
+    profile.downloaded_fonts = downloaded_fonts
+    profile.resident_scalable_fonts = parse_resident_scalable_fonts(resident_text)
+    profile.module_contents = parse_module_listing(all_memory_text)
+
+    _DATAMAX_PROFILE_CACHE[profile_dir] = profile
+    return profile
+
+
+def profile_font_overrides(profile: DatamaxPrinterProfile | None) -> dict[str, dict[str, str | float]]:
+    if profile is None:
+        return {}
+
+    overrides: dict[str, dict[str, str | float]] = {}
+    for font_code, font_name in profile.downloaded_fonts.items():
+        name = font_name.lower()
+        if "arialblack" in name:
+            overrides[font_code] = {"family": "Arial Black, Arial, sans-serif", "weight": "900", "scale": 1.0}
+        elif "arialnarrowb" in name:
+            overrides[font_code] = {"family": "Arial Narrow, Arial, sans-serif", "weight": "700", "scale": 1.0}
+        elif "arialnarrow" in name:
+            overrides[font_code] = {"family": "Arial Narrow, Arial, sans-serif", "weight": "400", "scale": 1.0}
+        elif "timesnewroma" in name or "timesnewroman" in name:
+            overrides[font_code] = {"family": "'Times New Roman', Times, serif", "weight": "400", "scale": 1.0}
+        elif "courier" in name:
+            overrides[font_code] = {"family": "'Courier New', Courier, monospace", "weight": "400", "scale": 1.0}
+        elif "arial" in name:
+            overrides[font_code] = {"family": "Arial, sans-serif", "weight": "400", "scale": 1.0}
+    return overrides
+
+
+def extract_label_paper_sizes(label_paper: str) -> list[tuple[float, float]]:
+    sizes: list[tuple[float, float]] = []
+    for match in LABEL_PAPER_SIZE_RE.finditer(label_paper):
+        size = (float(match.group("w")), float(match.group("h")))
+        if size not in sizes:
+            sizes.append(size)
+    return sizes
+
+
+def normalize_label_name(path: Path) -> str:
+    return path.stem.upper().replace(" ", "").replace("-", "_")
+
+
+def mm_to_units(value_mm: float) -> int:
+    return max(1, int(round(value_mm * DPL_UNITS_PER_MM)))
+
+
+def dedupe_size_candidates(
+    candidates: list[tuple[int, int, str]]
+) -> list[tuple[int, int, str]]:
+    seen: set[tuple[int, int, str]] = set()
+    unique: list[tuple[int, int, str]] = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        unique.append(candidate)
+    return unique
+
+
+def font_style(
+    font_code: str,
+    profile: DatamaxPrinterProfile | None = None,
+) -> dict[str, str | float]:
+    overrides = profile_font_overrides(profile)
+    if font_code in overrides:
+        return overrides[font_code]
     return FONT_STYLE_MAP.get(
         font_code,
         {"family": "Arial, sans-serif", "weight": "700", "scale": 1.0},
@@ -850,6 +1173,7 @@ def render_element_svg(
     canvas_height: int = 0,
     show_guides: bool = False,
     boxes: list[LabelElement] | None = None,
+    profile: DatamaxPrinterProfile | None = None,
 ) -> str:
     x = element.x
     y = canvas_height - element.y - element.h
@@ -914,7 +1238,7 @@ def render_element_svg(
         return ""
 
     font_code = element.font_code
-    style = font_style(font_code)
+    style = font_style(font_code, profile)
     font_size = element.font_px or max(8, int(element.h * 0.82))
     render_height = font_size + 2
     y = canvas_height - element.y - render_height
@@ -925,6 +1249,7 @@ def render_element_svg(
     char_width_dots = int(element.meta.get("char_width_dots", 0))
     if char_height_dots > 0 and char_width_dots > 0:
         width_scale = char_width_dots / char_height_dots
+    width_scale *= float(style.get("scale", 1.0))
     box = containing_box(element, boxes)
     if box is not None:
         horizontal_padding = 2
@@ -951,6 +1276,7 @@ def render_element_svg(
     )
 
 def build_preview_svg(parsed: ParsedLabel) -> str:
+    profile = load_datamax_profile(parsed.path)
     label_width, label_height, _min_x, _min_y = estimate_canvas_size(parsed)
     boxes = [element for element in parsed.elements if element.kind == "box"]
     page_w = label_width
@@ -967,6 +1293,7 @@ def build_preview_svg(parsed: ParsedLabel) -> str:
                 graphics=parsed.graphics,
                 canvas_height=label_height,
                 boxes=boxes,
+                profile=profile,
             )
         )
 
@@ -983,10 +1310,31 @@ def build_preview_svg(parsed: ParsedLabel) -> str:
     return svg
 
 
+def profile_note_html(profile: DatamaxPrinterProfile | None) -> str:
+    if profile is None:
+        return "<p class='note'>Printer profile data folder not found. Rendering uses the built-in Datamax I-4310e Mark II defaults.</p>"
+    firmware = escape(profile.firmware or "unknown")
+    status_raw = escape(profile.status_raw or "unknown")
+    downloaded = escape(profile.downloaded_font_summary)
+    resident = escape(profile.resident_font_summary)
+    profile_dir = escape(str(profile.source_dir))
+    return (
+        "<details class='profile' open>"
+        "<summary>Loaded printer profile from Datamax I-4310e Mark II</summary>"
+        f"<div class='profile-line'>Source: {profile_dir}</div>"
+        f"<div class='profile-line'>Firmware: {firmware}</div>"
+        f"<div class='profile-line'>Status raw: {status_raw}</div>"
+        f"<div class='profile-line'>Downloaded fonts: {downloaded}</div>"
+        f"<div class='profile-line'>Resident scalable fonts: {resident}</div>"
+        "</details>"
+    )
+
+
 def write_preview_outputs(input_root: Path, files: list[Path]) -> Path:
     output_dir = input_root / "DPL_Preview"
     svg_dir = output_dir / "svg"
     svg_dir.mkdir(parents=True, exist_ok=True)
+    profile = load_datamax_profile(input_root)
 
     rows: list[str] = []
     rows.append("<!DOCTYPE html><html><head><meta charset='utf-8'><title>DPL Preview</title>")
@@ -999,6 +1347,10 @@ def write_preview_outputs(input_root: Path, files: list[Path]) -> Path:
         ".card{background:#fff;border:1px solid #cfd4da;border-radius:7px;padding:10px;overflow:hidden;}"
         ".name{font:700 13px Consolas,monospace;margin-bottom:8px;}"
         ".fonts{font:11px Consolas,monospace;color:#59636e;margin-top:7px;}"
+        ".note{max-width:1320px;line-height:1.45;}"
+        ".profile{max-width:1320px;background:#fff;border:1px solid #cfd4da;border-radius:7px;padding:10px 12px;margin:10px 0 14px;}"
+        ".profile summary{cursor:pointer;font-weight:700;}"
+        ".profile-line{font:12px Consolas,monospace;color:#37414c;margin-top:6px;word-break:break-word;}"
         ".preview{height:260px;display:flex;align-items:center;justify-content:center;"
         "overflow:hidden;border:1px solid #ddd;background:#fff;}"
         "img{display:block;max-width:100%;max-height:100%;width:auto;height:auto;}"
@@ -1015,6 +1367,7 @@ def write_preview_outputs(input_root: Path, files: list[Path]) -> Path:
         f"{PRINTER_UNPRINTABLE_RANGE_MM} mm. The driver's current 103.5 x 152.4 mm "
         "user stock is not forced onto formats that do not declare that size.</p>"
     )
+    rows.append(profile_note_html(profile))
     rows.append("<div class='grid'>")
 
     for file_path in files:
